@@ -35,3 +35,7 @@ Thumbs.db
 *.log
 .pw-profile/
 publish-run.*.txt
+
+# local-only examples and debug artifacts
+docs/
+notes/
