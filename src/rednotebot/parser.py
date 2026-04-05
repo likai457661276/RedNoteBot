@@ -17,17 +17,35 @@ class NoteContent:
     Attributes:
         source_path: Markdown 文件的原始路径。
         title: 笔记标题（由 # 一级标题定义）。
-        body: 笔记正文内容（由 ## 正文 段落定义）。
+        content: 笔记正文内容（由 ## 正文 段落定义）。
         tags: 标签列表（由 ## 标签 段落定义）。
         topics: 话题列表（由 ## 活动话题 或 ## 话题 段落定义）。
         images: 笔记中引用的图片文件路径列表。
     """
     source_path: Path
     title: str
-    body: str
+    content: str
     tags: list[str]
     topics: list[str]
     images: list[Path]
+
+    @property
+    def body(self) -> str:
+        """兼容旧字段名，避免调用方一次性大改。"""
+        return self.content
+
+    def to_publish_payload(self) -> dict[str, str | list[str]]:
+        """
+        生成发布层使用的统一结构化字典。
+
+        Returns:
+            dict[str, str | list[str]]: 统一的标题、正文和标签载荷。
+        """
+        return {
+            "title": self.title,
+            "content": self.content,
+            "tags": list(self.tags),
+        }
 
 
 def parse_markdown_note(note_path: str | Path) -> NoteContent:
@@ -75,18 +93,18 @@ def parse_markdown_note(note_path: str | Path) -> NoteContent:
     if not title:
         raise ValueError("Markdown 缺少一级标题，例如：# 笔记标题")
 
-    body = "\n".join(sections.get("正文", [])).strip()
-    if not body:
+    content = "\n".join(sections.get("正文", [])).strip()
+    if not content:
         raise ValueError("Markdown 缺少正文内容，请提供 ## 正文 段落")
 
     tags = _parse_tags(sections.get("标签", []))
     topics = _parse_topics(sections.get("活动话题", []), sections.get("话题", []))
-    images = _parse_images(path.parent, body, sections.get("附加图片", []))
+    images = _parse_images(path.parent, content, sections.get("附加图片", []))
 
     return NoteContent(
         source_path=path,
         title=title,
-        body=body,
+        content=content,
         tags=tags,
         topics=topics,
         images=images,
