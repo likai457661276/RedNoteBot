@@ -8,6 +8,16 @@ from .publisher import DEFAULT_SELECTORS, XhsPublisher, page_feature_markdown, s
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """
+    构建命令行参数解析器。
+    
+    定义了以下主要参数：
+    - note: Markdown 笔记的路径。
+    - --cookies: 存储登录态的 JSON 文件路径。
+    - --headless: 是否使用无头模式运行（生产环境建议开启）。
+    - --slow-mo: 步骤间的延迟，用于调试时观察。
+    - --inspect-page: 用于采集页面特征，排查选择器失效问题。
+    """
     parser = argparse.ArgumentParser(description="根据 Markdown 模板自动发布小红书笔记")
     parser.add_argument("note", nargs="?", default="notes/sample_note.md", help="Markdown 笔记路径")
     parser.add_argument("--cookies", default="playwright-state.json", help="Cookie JSON 文件路径")
@@ -30,6 +40,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """
+    CLI 程序入口。
+    
+    负责：
+    1. 解析命令行参数。
+    2. 根据参数选择执行：打印选择器、采集页面特征 或 执行发布流程。
+    """
     parser = build_parser()
     args = parser.parse_args()
 

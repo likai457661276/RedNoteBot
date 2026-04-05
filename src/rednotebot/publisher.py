@@ -17,6 +17,9 @@ PUBLISH_URL = "https://creator.xiaohongshu.com/publish/publish"
 
 @dataclass(frozen=True, slots=True)
 class SelectorSet:
+    """
+    存储小红书页面各组件的选择器集合。
+    """
     login_button: str = 'button:has-text("登录"), text=APP扫一扫登录, text=扫码登录'
     long_article_entry: str = '.creator-tab:has-text("写长文"), span.title:has-text("写长文"), text=写长文'
     new_article_button: str = '.new-btn, button:has-text("新的创作"), text=新的创作'
@@ -32,6 +35,9 @@ class SelectorSet:
 
 @dataclass(frozen=True, slots=True)
 class SceneSpec:
+    """
+    定义页面场景及其识别特征。
+    """
     scene_name: str
     label: str
     detectors: tuple[str, ...]
@@ -40,6 +46,9 @@ class SceneSpec:
 
 @dataclass(frozen=True, slots=True)
 class SelectorSpec:
+    """
+    定义特定动作对应的选择器规格。
+    """
     field_name: str
     scene_name: str
     action_name: str
@@ -49,6 +58,9 @@ class SelectorSpec:
 
 @dataclass(frozen=True, slots=True)
 class PageFeature:
+    """
+    存储单个页面元素的特征信息，用于调试。
+    """
     scene_name: str
     action_name: str
     field_name: str
@@ -62,6 +74,9 @@ class PageFeature:
 
 @dataclass(frozen=True, slots=True)
 class PageFeatureReport:
+    """
+    页面特征采集报告。
+    """
     requested_url: str
     final_url: str
     page_title: str
@@ -241,6 +256,11 @@ def page_feature_markdown(report: PageFeatureReport) -> str:
 
 
 class XhsPublisher:
+    """
+    负责执行小红书笔记发布流程。
+    
+    使用 Playwright 驱动浏览器完成登录检查、进入编辑器、填写内容、排版和发布动作。
+    """
     def __init__(
         self,
         selectors: SelectorSet = DEFAULT_SELECTORS,
@@ -249,6 +269,16 @@ class XhsPublisher:
         slow_mo_ms: int = 0,
         timeout_ms: int = 15_000,
     ) -> None:
+        """
+        初始化发布器。
+        
+        Args:
+            selectors: 选择器配置。
+            cookies_path: Playwright 状态文件路径（用于保持登录态）。
+            headless: 是否以无头模式运行浏览器。
+            slow_mo_ms: 操作延迟（毫秒），便于观察。
+            timeout_ms: 默认等待超时（毫秒）。
+        """
         self.selectors = selectors
         self.cookies_path = Path(cookies_path).expanduser().resolve() if cookies_path else None
         self.headless = headless
@@ -256,6 +286,18 @@ class XhsPublisher:
         self.timeout_ms = timeout_ms
 
     def publish(self, note: NoteContent) -> None:
+        """
+        发布一篇笔记。
+        
+        流程包括：
+        1. 启动浏览器并加载登录态。
+        2. 打开创作平台主页。
+        3. 确保已登录（若未登录则提示人工扫码）。
+        4. 进入长文编辑器。
+        5. 填写标题、正文和上传图片。
+        6. 执行排版并提交发布。
+        7. 保存最新的登录态。
+        """
         _ensure_images_exist(note.images)
 
         with sync_playwright() as playwright:
@@ -277,6 +319,9 @@ class XhsPublisher:
             browser.close()
 
     def inspect_page(self, url: str = PUBLISH_URL) -> PageFeatureReport:
+        """
+        采集指定页面的特征，用于排查选择器失效或页面结构变化。
+        """
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=self.headless, slow_mo=self.slow_mo_ms)
             context = self._create_context(browser)
@@ -301,21 +346,29 @@ class XhsPublisher:
             return report
 
     def _open_home(self, page: Page) -> None:
+        """打开发布主页。"""
         self._log(f"打开发布页：{PUBLISH_URL}")
         page.goto(PUBLISH_URL, wait_until="domcontentloaded")
         page.wait_for_timeout(1_500)
 
     def _ensure_login(self, page: Page) -> None:
+        """
+        检查并确保已登录。如果处于登录页，会等待用户手动完成扫码。
+        """
         scene = self._detect_scene(page)
         if scene != "login":
             return
 
         self._click_action_if_found(page, "login_button")
         self._log("当前处于登录页，请在浏览器中完成登录。")
+        # 默认等待 120 秒让人工扫码登录
         self._wait_for_scene(page, ("studio_home", "editor"), timeout_ms=120_000)
         self._log(f"登录完成，当前场景：{_scene_label(self._detect_scene(page))}")
 
     def _open_editor(self, page: Page) -> None:
+        """
+        从当前页面导航到长文编辑页。
+        """
         scene = self._detect_scene(page)
         if scene == "editor":
             self._log("已在长文编辑页。")
@@ -343,6 +396,9 @@ class XhsPublisher:
         self._log("已进入长文编辑页。")
 
     def _fill_form(self, page: Page, note: NoteContent) -> None:
+        """
+        在编辑器中填写标题、正文并上传图片。
+        """
         self._log("开始填写标题和正文。")
         title_input = self._require_locator(page, "title_input")
         title_input.fill(note.title)
@@ -358,6 +414,9 @@ class XhsPublisher:
         self._log("内容填写完成。")
 
     def _submit(self, page: Page, note: NoteContent) -> None:
+        """
+        执行排版、补充标签/话题并最终发布。
+        """
         self._log("开始排版。")
         self._require_locator(page, "format_button").click()
         self._wait_for_action(page, "next_step_button", timeout_ms=30_000)
@@ -375,6 +434,7 @@ class XhsPublisher:
             self._log(f"未捕获到明确的发布成功结果页，请人工确认页面状态：{page.url}")
 
     def _confirm_tag(self, page: Page, tag: str) -> None:
+        """处理标签输入后的自动建议确认。"""
         suggestions = self._find_first_matching_locator(page, "tag_suggestion")
         if suggestions is not None:
             try:
@@ -385,6 +445,7 @@ class XhsPublisher:
         page.keyboard.press("Enter")
 
     def _wait_for_upload_settle(self, page: Page) -> None:
+        """等待所有图片上传和处理完成。"""
         page.wait_for_timeout(2_000)
         for _ in range(20):
             pending = page.locator('text=/上传中|处理中|封面生成中/')
@@ -393,6 +454,9 @@ class XhsPublisher:
             page.wait_for_timeout(1_000)
 
     def _fill_publish_description(self, page: Page, note: NoteContent) -> None:
+        """
+        在发布确认页补充笔记标签和参与话题。
+        """
         editor = self._require_locator(page, "body_editor")
         editor.click()
         if note.tags:
@@ -414,6 +478,9 @@ class XhsPublisher:
                 self._confirm_tag(page, f"#{normalized}")
 
     def _apply_topics(self, page: Page, topics: list[str]) -> None:
+        """
+        尝试在页面中查找并点击指定的话题。
+        """
         for topic in topics:
             normalized = topic.strip().lstrip("#").strip()
             if not normalized:
@@ -428,6 +495,9 @@ class XhsPublisher:
                 print(f"活动话题“{normalized}”点击后未确认写入，请人工检查页面状态。")
 
     def _is_topic_added(self, page: Page, topic: str) -> bool:
+        """
+        检查话题是否已被添加。
+        """
         escaped = re.escape(topic)
         indicators = (
             f'text=/已添加.*{escaped}|{escaped}.*已添加/',
@@ -445,6 +515,9 @@ class XhsPublisher:
         return False
 
     def _click_topic_add_button(self, page: Page, topic: str) -> bool:
+        """
+        点击话题旁边的“添加”按钮。
+        """
         for xpath in _topic_button_xpaths(topic):
             locator = page.locator(f"xpath={xpath}")
             if locator.count() == 0:
@@ -468,12 +541,14 @@ class XhsPublisher:
         return False
 
     def _create_context(self, browser: Any) -> Any:
+        """创建浏览器上下文。"""
         storage_state = self._storage_state_value()
         if storage_state is not None:
             return browser.new_context(storage_state=storage_state)
         return browser.new_context()
 
     def _storage_state_value(self) -> str | dict[str, Any] | None:
+        """解析并返回 Playwright storage_state 的值。"""
         if not self.cookies_path or not self.cookies_path.exists():
             return None
         raw = self.cookies_path.read_text(encoding="utf-8")
@@ -490,6 +565,7 @@ class XhsPublisher:
         return str(self.cookies_path)
 
     def _load_cookies(self, context: Any) -> None:
+        """加载 Cookie。"""
         if not self.cookies_path or not self.cookies_path.exists():
             return
         cookies = json.loads(self.cookies_path.read_text(encoding="utf-8"))
@@ -497,11 +573,15 @@ class XhsPublisher:
             context.add_cookies(cookies)
 
     def _save_cookies(self, context: Any) -> None:
+        """保存当前登录状态到文件。"""
         if not self.cookies_path:
             return
         context.storage_state(path=str(self.cookies_path))
 
     def _detect_scene(self, page: Page) -> str:
+        """
+        识别当前页面所处的场景。
+        """
         if "published=true" in page.url:
             return "publish_result"
         for scene in SCENE_SPECS:
@@ -511,9 +591,11 @@ class XhsPublisher:
         return "unknown"
 
     def _log(self, message: str) -> None:
+        """打印带前缀的日志。"""
         print(f"[RedNoteBot] {message}")
 
     def _wait_for_scene(self, page: Page, scene_names: tuple[str, ...], timeout_ms: int) -> str:
+        """等待页面进入指定的场景之一。"""
         deadline = time.monotonic() + timeout_ms / 1000
         while time.monotonic() < deadline:
             scene = self._detect_scene(page)
@@ -524,6 +606,7 @@ class XhsPublisher:
         raise PlaywrightTimeoutError(f"等待场景超时，期望进入：{expected}")
 
     def _wait_for_action(self, page: Page, field_name: str, timeout_ms: int) -> Locator:
+        """等待指定的动作元素在页面上可见。"""
         deadline = time.monotonic() + timeout_ms / 1000
         while time.monotonic() < deadline:
             locator = self._find_first_matching_locator(page, field_name)
@@ -533,6 +616,7 @@ class XhsPublisher:
         raise PlaywrightTimeoutError(f"等待动作 `{field_name}` 对应元素超时。")
 
     def _collect_page_features(self, page: Page) -> list[PageFeature]:
+        """采集当前页面所有预定义动作元素的特征。"""
         features: list[PageFeature] = []
         for spec in SELECTOR_SPECS:
             matched_selector, match_count, first_tag, first_text = self._probe_selectors(page, spec.selectors)
@@ -552,6 +636,7 @@ class XhsPublisher:
         return features
 
     def _click_action_if_found(self, page: Page, field_name: str) -> bool:
+        """如果找到了指定动作的元素，则点击它。"""
         locator = self._find_first_matching_locator(page, field_name)
         if locator is None:
             return False
@@ -559,12 +644,18 @@ class XhsPublisher:
         return True
 
     def _require_locator(self, page: Page, field_name: str) -> Locator:
+        """
+        获取指定动作的元素，如果未找到则抛出异常。
+        """
         locator = self._find_first_matching_locator(page, field_name)
         if locator is None:
             raise RuntimeError(f"未找到动作 `{field_name}` 对应元素，请先重新采集页面特征。")
         return locator.first
 
     def _find_first_matching_locator(self, page: Page, field_name: str) -> Locator | None:
+        """
+        在页面中按顺序查找匹配指定动作候选选择器的第一个元素。
+        """
         spec = _selector_spec(field_name)
         for selector in spec.selectors:
             locator = page.locator(selector)
@@ -573,6 +664,9 @@ class XhsPublisher:
         return None
 
     def _probe_selectors(self, page: Page, selectors: tuple[str, ...]) -> tuple[str, int, str, str]:
+        """
+        探测一组选择器，返回第一个命中的选择器及其元素特征。
+        """
         for selector in selectors:
             locator = page.locator(selector)
             count = locator.count()
@@ -592,6 +686,7 @@ class XhsPublisher:
 
 
 def _ensure_images_exist(images: list[Path]) -> None:
+    """确保所有待上传的图片文件都存在。"""
     missing = [str(path) for path in images if not path.exists()]
     if missing:
         joined = "\n".join(missing)
@@ -599,6 +694,7 @@ def _ensure_images_exist(images: list[Path]) -> None:
 
 
 def _selector_spec(field_name: str) -> SelectorSpec:
+    """根据变量名查找其对应的选择器规格。"""
     for spec in SELECTOR_SPECS:
         if spec.field_name == field_name:
             return spec
@@ -606,6 +702,7 @@ def _selector_spec(field_name: str) -> SelectorSpec:
 
 
 def _scene_label(scene_name: str) -> str:
+    """将场景内部标识符转换为人类可读的标签。"""
     for scene in SCENE_SPECS:
         if scene.scene_name == scene_name:
             return scene.label
@@ -613,10 +710,12 @@ def _scene_label(scene_name: str) -> str:
 
 
 def _markdown_cell(value: str) -> str:
+    """转义 Markdown 表格单元格中的特殊字符。"""
     return value.replace("|", "\\|")
 
 
 def _topic_button_xpaths(topic: str) -> tuple[str, ...]:
+    """生成查找话题添加按钮的 XPath。"""
     literal = _xpath_literal(topic)
     return (
         f"{_topic_item_xpath(topic)}//*[self::button or @role='button' or self::span][contains(normalize-space(.), '添加话题')]",
@@ -625,6 +724,7 @@ def _topic_button_xpaths(topic: str) -> tuple[str, ...]:
 
 
 def _topic_container_xpaths(topic: str) -> tuple[str, ...]:
+    """生成查找话题容器的 XPath。"""
     literal = _xpath_literal(topic)
     return (
         f"//*[contains(normalize-space(.), {literal})]/ancestor::*[self::div or self::section][1]",
@@ -633,6 +733,7 @@ def _topic_container_xpaths(topic: str) -> tuple[str, ...]:
 
 
 def _xpath_literal(value: str) -> str:
+    """处理 XPath 中的引号转义。"""
     if "'" not in value:
         return f"'{value}'"
     if '"' not in value:
@@ -643,6 +744,7 @@ def _xpath_literal(value: str) -> str:
 
 
 def _topic_item_xpath(topic: str) -> str:
+    """生成查找话题条目的 XPath。"""
     literal = _xpath_literal(topic)
     return "//*[contains(@class, 'event') or contains(@class, 'item')][.//*[contains(normalize-space(.), {literal})]]".format(
         literal=literal
