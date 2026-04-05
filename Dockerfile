@@ -46,4 +46,4 @@ COPY notes ./notes
 RUN uv sync --frozen --no-dev
 RUN uv run playwright install chromium
 
-CMD ["uv", "run", "python", "publish_xhs.py", "notes/sample_note.md", "--cookies", "/app/playwright-state.json"]
+CMD ["uv", "run", "python", "publish_xhs.py", "notes/sample_note.md", "--cookies", "/app/playwright-state.json", "--headless"]

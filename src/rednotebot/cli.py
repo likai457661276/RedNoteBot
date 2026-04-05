@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from .parser import parse_markdown_note
-from .publisher import DEFAULT_SELECTORS, XhsPublisher, selector_reference_markdown
+from .publisher import DEFAULT_SELECTORS, XhsPublisher, page_feature_markdown, selector_reference_markdown
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -15,6 +15,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--slow-mo", type=int, default=300, help="浏览器每步操作的延迟毫秒数")
     parser.add_argument("--timeout", type=int, default=15_000, help="Playwright 默认超时毫秒数")
     parser.add_argument("--print-selectors", action="store_true", help="打印当前使用的选择器表")
+    parser.add_argument("--inspect-page", action="store_true", help="打开页面并导出当前动作元素特征表")
+    parser.add_argument(
+        "--feature-url",
+        default="https://creator.xiaohongshu.com/publish/publish",
+        help="采集页面特征时使用的 URL",
+    )
+    parser.add_argument(
+        "--feature-output",
+        default="docs/xhs-page-features.md",
+        help="页面特征 Markdown 输出路径",
+    )
     return parser
 
 
@@ -26,7 +37,6 @@ def main() -> None:
         print(selector_reference_markdown(DEFAULT_SELECTORS))
         return
 
-    note = parse_markdown_note(Path(args.note))
     publisher = XhsPublisher(
         selectors=DEFAULT_SELECTORS,
         cookies_path=args.cookies,
@@ -34,6 +44,16 @@ def main() -> None:
         slow_mo_ms=args.slow_mo,
         timeout_ms=args.timeout,
     )
+
+    if args.inspect_page:
+        report = publisher.inspect_page(args.feature_url)
+        output_path = Path(args.feature_output).expanduser().resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(page_feature_markdown(report), encoding="utf-8")
+        print(f"页面特征已写入：{output_path}")
+        return
+
+    note = parse_markdown_note(Path(args.note))
     publisher.publish(note)
 
 

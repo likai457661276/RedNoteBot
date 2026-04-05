@@ -1,47 +1,242 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
+from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 from .parser import NoteContent
 
 
+PUBLISH_URL = "https://creator.xiaohongshu.com/publish/publish"
+
+
 @dataclass(frozen=True, slots=True)
 class SelectorSet:
-    login_button: str = 'button:has-text("登录")'
-    new_note_button: str = 'button:has-text("发布笔记"), a:has-text("发布笔记"), div:has-text("发布笔记")'
-    title_input: str = 'input[placeholder*="标题"], textarea[placeholder*="标题"]'
+    login_button: str = 'button:has-text("登录"), text=APP扫一扫登录, text=扫码登录'
+    long_article_entry: str = '.creator-tab:has-text("写长文"), span.title:has-text("写长文"), text=写长文'
+    new_article_button: str = '.new-btn, button:has-text("新的创作"), text=新的创作'
+    title_input: str = 'textarea[placeholder*="输入标题"], input[placeholder*="标题"], textarea[placeholder*="标题"]'
     body_editor: str = '[contenteditable="true"], textarea[placeholder*="正文"]'
     image_input: str = 'input[type="file"][accept*="image"], input[type="file"]'
-    publish_button: str = 'button:has-text("发布"), button:has-text("立即发布")'
-    tag_suggestion: str = '[class*="tag"]'
-    publish_success_hint: str = 'text=发布成功'
+    publish_button: str = 'button:has-text("发布"), button:has-text("立即发布"), [role="button"]:has-text("发布")'
+    format_button: str = '.next-btn, button:has-text("一键排版")'
+    next_step_button: str = 'button:has-text("下一步")'
+    tag_suggestion: str = '[class*="tag"], [class*="mention"], [class*="suggest"]'
+    publish_success_hint: str = "text=/发布成功|笔记发布成功|发布完成/"
 
 
-DEFAULT_SELECTORS = SelectorSet()
+@dataclass(frozen=True, slots=True)
+class SceneSpec:
+    scene_name: str
+    label: str
+    detectors: tuple[str, ...]
+    description: str
+
+
+@dataclass(frozen=True, slots=True)
+class SelectorSpec:
+    field_name: str
+    scene_name: str
+    action_name: str
+    selectors: tuple[str, ...]
+    description: str
+
+
+@dataclass(frozen=True, slots=True)
+class PageFeature:
+    scene_name: str
+    action_name: str
+    field_name: str
+    candidates: tuple[str, ...]
+    matched_selector: str
+    description: str
+    match_count: int
+    first_tag: str
+    first_text: str
+
+
+@dataclass(frozen=True, slots=True)
+class PageFeatureReport:
+    requested_url: str
+    final_url: str
+    page_title: str
+    detected_scene: str
+    features: tuple[PageFeature, ...]
+
+
+SCENE_SPECS = (
+    SceneSpec(
+        "publish_result",
+        "发布结果页",
+        ("text=发布成功", "text=笔记发布成功", "text=查看笔记"),
+        "表单已经提交，页面处于结果确认态。",
+    ),
+    SceneSpec(
+        "article_hub",
+        "长文创作入口页",
+        ('.new-btn', 'button:has-text("新的创作")', '.import-link-btn'),
+        "已进入长文入口，但还需要新建一篇长文。",
+    ),
+    SceneSpec(
+        "editor",
+        "长文编辑页",
+        ('textarea[placeholder*="输入标题"]', '.next-btn', '[contenteditable="true"]'),
+        "可以直接填写长文标题、正文并上传图片。",
+    ),
+    SceneSpec(
+        "login",
+        "登录页",
+        ("text=APP扫一扫登录", "text=扫码登录", 'button:has-text("登录")'),
+        "需要人工扫码或账号登录。",
+    ),
+    SceneSpec(
+        "studio_home",
+        "创作平台导航页",
+        ('.creator-tab', '.upload-input', "text=发布笔记"),
+        "已进入创作平台，但还未进入长文编辑器。",
+    ),
+)
+
+SELECTOR_SPECS = (
+    SelectorSpec(
+        "login_button",
+        "login",
+        "触发登录",
+        ('button:has-text("登录")', 'text=APP扫一扫登录', 'text=扫码登录'),
+        "登录入口，Cookie 失效时需要人工扫码。",
+    ),
+    SelectorSpec(
+        "long_article_entry",
+        "studio_home",
+        "进入长文创作入口",
+        ('.creator-tab:has-text("写长文")', 'span.title:has-text("写长文")', "text=写长文"),
+        "从导航页进入长文创作流。",
+    ),
+    SelectorSpec(
+        "new_article_button",
+        "article_hub",
+        "新建长文",
+        ('.new-btn', 'button:has-text("新的创作")', "text=新的创作"),
+        "在长文入口页创建一篇新的长文。",
+    ),
+    SelectorSpec(
+        "title_input",
+        "editor",
+        "填写标题",
+        ('textarea[placeholder*="输入标题"]', 'input[placeholder*="标题"]', 'textarea[placeholder*="标题"]'),
+        "标题输入框。",
+    ),
+    SelectorSpec(
+        "body_editor",
+        "editor",
+        "填写正文",
+        ('[contenteditable="true"]', 'textarea[placeholder*="正文"]'),
+        "正文编辑区域。",
+    ),
+    SelectorSpec(
+        "image_input",
+        "editor",
+        "上传图片",
+        ('input[type="file"][accept*="image"]', 'input[type="file"]'),
+        "图片上传 input。",
+    ),
+    SelectorSpec(
+        "publish_button",
+        "publish_result",
+        "提交发布",
+        ('button:has-text("立即发布")', 'button:has-text("发布")', '[role="button"]:has-text("发布")'),
+        "发布按钮。",
+    ),
+    SelectorSpec(
+        "format_button",
+        "editor",
+        "生成排版预览",
+        ('.next-btn', 'button:has-text("一键排版")'),
+        "将长文内容生成图片化排版。",
+    ),
+    SelectorSpec(
+        "next_step_button",
+        "publish_result",
+        "进入发布确认页",
+        ('button:has-text("下一步")',),
+        "完成排版后进入最终发布确认页。",
+    ),
+    SelectorSpec(
+        "tag_suggestion",
+        "editor",
+        "确认标签联想",
+        ('[class*="tag"]', '[class*="suggest"]', '[class*="mention"]'),
+        "标签建议项，可选。",
+    ),
+    SelectorSpec(
+        "publish_success_hint",
+        "publish_result",
+        "识别发布成功",
+        ("text=发布成功", "text=笔记发布成功", "text=发布完成"),
+        "发布完成提示。",
+    ),
+)
+
+DEFAULT_SELECTORS = SelectorSet(**{spec.field_name: ", ".join(spec.selectors) for spec in SELECTOR_SPECS})
 
 
 def selector_reference_markdown(selectors: SelectorSet = DEFAULT_SELECTORS) -> str:
-    rows = [
-        ("login_button", selectors.login_button, "登录入口，Cookie 失效时需要人工扫码"),
-        ("new_note_button", selectors.new_note_button, "进入新建笔记页面"),
-        ("title_input", selectors.title_input, "标题输入框"),
-        ("body_editor", selectors.body_editor, "正文编辑区域"),
-        ("image_input", selectors.image_input, "图片上传 input"),
-        ("publish_button", selectors.publish_button, "发布按钮"),
-        ("tag_suggestion", selectors.tag_suggestion, "标签建议项，可选"),
-        ("publish_success_hint", selectors.publish_success_hint, "发布完成提示"),
-    ]
     lines = [
-        "| 变量名 | 默认选择器 | 说明 |",
-        "| --- | --- | --- |",
+        "| 场景 | 动作 | 变量名 | 默认选择器 | 说明 |",
+        "| --- | --- | --- | --- | --- |",
     ]
-    for name, selector, desc in rows:
-        lines.append(f"| `{name}` | `{selector}` | {desc} |")
+    for spec in SELECTOR_SPECS:
+        selector = getattr(selectors, spec.field_name)
+        scene_label = _scene_label(spec.scene_name)
+        lines.append(f"| {scene_label} | {spec.action_name} | `{spec.field_name}` | `{selector}` | {spec.description} |")
+    return "\n".join(lines)
+
+
+def page_feature_markdown(report: PageFeatureReport) -> str:
+    lines = [
+        "# 小红书页面特征表",
+        "",
+        f"- 请求地址：`{report.requested_url}`",
+        f"- 最终地址：`{report.final_url}`",
+        f"- 页面标题：`{report.page_title}`",
+        f"- 当前场景：`{_scene_label(report.detected_scene)}`",
+        "",
+        "## 场景检测",
+        "",
+        "| 场景 | 说明 |",
+        "| --- | --- |",
+    ]
+    for scene in SCENE_SPECS:
+        lines.append(f"| {scene.label} | {scene.description} |")
+
+    lines.extend(
+        [
+            "",
+            "## 动作元素映射",
+            "",
+            "| 场景 | 动作 | 变量名 | 候选选择器 | 命中选择器 | 命中数 | 首个标签 | 首个文本 | 说明 |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    for feature in report.features:
+        lines.append(
+            "| {scene} | {action} | `{field}` | `{candidates}` | `{matched}` | {count} | `{tag}` | {text} | {desc} |".format(
+                scene=_scene_label(feature.scene_name),
+                action=feature.action_name,
+                field=feature.field_name,
+                candidates=_markdown_cell(" | ".join(feature.candidates)),
+                matched=_markdown_cell(feature.matched_selector or "-"),
+                count=feature.match_count,
+                tag=_markdown_cell(feature.first_tag or "-"),
+                text=_markdown_cell(feature.first_text or "-"),
+                desc=feature.description,
+            )
+        )
     return "\n".join(lines)
 
 
@@ -65,73 +260,123 @@ class XhsPublisher:
 
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=self.headless, slow_mo=self.slow_mo_ms)
-            context = browser.new_context()
+            context = self._create_context(browser)
             context.set_default_timeout(self.timeout_ms)
-            if self.cookies_path:
-                self._load_cookies(context)
 
             page = context.new_page()
+            self._log(f"开始发布：{note.title}")
             self._open_home(page)
             self._ensure_login(page)
             self._open_editor(page)
             self._fill_form(page, note)
-            self._submit(page)
+            self._submit(page, note)
+            self._log(f"发布流程结束，当前页面：{page.url}")
 
             if self.cookies_path:
                 self._save_cookies(context)
             browser.close()
 
+    def inspect_page(self, url: str = PUBLISH_URL) -> PageFeatureReport:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=self.headless, slow_mo=self.slow_mo_ms)
+            context = self._create_context(browser)
+            context.set_default_timeout(self.timeout_ms)
+
+            page = context.new_page()
+            page.goto(url, wait_until="domcontentloaded")
+            page.wait_for_timeout(2_000)
+
+            features = tuple(self._collect_page_features(page))
+            report = PageFeatureReport(
+                requested_url=url,
+                final_url=page.url,
+                page_title=page.title(),
+                detected_scene=self._detect_scene(page),
+                features=features,
+            )
+
+            if self.cookies_path:
+                self._save_cookies(context)
+            browser.close()
+            return report
+
     def _open_home(self, page: Page) -> None:
-        page.goto("https://creator.xiaohongshu.com/publish/publish", wait_until="domcontentloaded")
+        self._log(f"打开发布页：{PUBLISH_URL}")
+        page.goto(PUBLISH_URL, wait_until="domcontentloaded")
+        page.wait_for_timeout(1_500)
 
     def _ensure_login(self, page: Page) -> None:
-        try:
-            page.wait_for_selector(self.selectors.new_note_button, timeout=8_000)
+        scene = self._detect_scene(page)
+        if scene != "login":
             return
-        except PlaywrightTimeoutError:
-            pass
 
-        try:
-            page.click(self.selectors.login_button, timeout=3_000)
-        except PlaywrightTimeoutError:
-            pass
-
-        print("未检测到已登录态，请在浏览器中完成登录。")
-        page.wait_for_selector(self.selectors.new_note_button, timeout=120_000)
+        self._click_action_if_found(page, "login_button")
+        self._log("当前处于登录页，请在浏览器中完成登录。")
+        self._wait_for_scene(page, ("studio_home", "editor"), timeout_ms=120_000)
+        self._log(f"登录完成，当前场景：{_scene_label(self._detect_scene(page))}")
 
     def _open_editor(self, page: Page) -> None:
-        page.goto("https://creator.xiaohongshu.com/publish/publish", wait_until="domcontentloaded")
-        page.wait_for_selector(self.selectors.title_input)
+        scene = self._detect_scene(page)
+        if scene == "editor":
+            self._log("已在长文编辑页。")
+            return
+
+        page.goto(PUBLISH_URL, wait_until="domcontentloaded")
+        page.wait_for_timeout(1_500)
+
+        scene = self._detect_scene(page)
+        if scene == "editor":
+            self._log("刷新后已进入长文编辑页。")
+            return
+        if scene == "login":
+            raise RuntimeError("仍停留在登录页，无法进入长文编辑器。请先完成登录。")
+
+        self._log(f"准备进入长文入口，当前场景：{_scene_label(scene)}")
+        self._click_action_if_found(page, "long_article_entry")
+        page.wait_for_timeout(1_500)
+
+        scene = self._wait_for_scene(page, ("article_hub", "editor"), timeout_ms=30_000)
+        if scene == "article_hub":
+            self._log("已进入长文入口页，准备点击“新的创作”。")
+            self._require_locator(page, "new_article_button").click()
+            self._wait_for_scene(page, ("editor",), timeout_ms=30_000)
+        self._log("已进入长文编辑页。")
 
     def _fill_form(self, page: Page, note: NoteContent) -> None:
-        title_input = page.locator(self.selectors.title_input).first
+        self._log("开始填写标题和正文。")
+        title_input = self._require_locator(page, "title_input")
         title_input.fill(note.title)
 
-        editor = page.locator(self.selectors.body_editor).first
+        editor = self._require_locator(page, "body_editor")
         editor.click()
         editor.fill(note.body)
 
         if note.images:
-            page.locator(self.selectors.image_input).first.set_input_files([str(path) for path in note.images])
+            self._log(f"开始上传图片，共 {len(note.images)} 张。")
+            self._require_locator(page, "image_input").set_input_files([str(path) for path in note.images])
             self._wait_for_upload_settle(page)
+        self._log("内容填写完成。")
 
-        if note.tags:
-            editor.press("End")
-            for tag in note.tags:
-                editor.type(f" {tag}")
-                page.wait_for_timeout(500)
-                self._confirm_tag(page, tag)
-
-    def _submit(self, page: Page) -> None:
-        page.locator(self.selectors.publish_button).first.click()
+    def _submit(self, page: Page, note: NoteContent) -> None:
+        self._log("开始排版。")
+        self._require_locator(page, "format_button").click()
+        self._wait_for_action(page, "next_step_button", timeout_ms=30_000)
+        self._log("进入发布确认页。")
+        self._require_locator(page, "next_step_button").click()
+        page.wait_for_timeout(1_500)
+        self._fill_publish_description(page, note)
+        self._wait_for_action(page, "publish_button", timeout_ms=30_000)
+        self._log("点击发布按钮。")
+        self._require_locator(page, "publish_button").click()
         try:
-            page.wait_for_selector(self.selectors.publish_success_hint, timeout=20_000)
+            self._wait_for_scene(page, ("publish_result",), timeout_ms=20_000)
+            self._log(f"检测到发布成功结果页：{page.url}")
         except PlaywrightTimeoutError:
-            print("未捕获到明确的发布成功提示，请人工确认页面状态。")
+            self._log(f"未捕获到明确的发布成功结果页，请人工确认页面状态：{page.url}")
 
     def _confirm_tag(self, page: Page, tag: str) -> None:
-        suggestions = page.locator(self.selectors.tag_suggestion)
-        if suggestions.count() > 0:
+        suggestions = self._find_first_matching_locator(page, "tag_suggestion")
+        if suggestions is not None:
             try:
                 suggestions.filter(has_text=tag.lstrip("#")).first.click(timeout=1_500)
                 return
@@ -147,6 +392,103 @@ class XhsPublisher:
                 return
             page.wait_for_timeout(1_000)
 
+    def _fill_publish_description(self, page: Page, note: NoteContent) -> None:
+        editor = self._require_locator(page, "body_editor")
+        editor.click()
+        if note.tags:
+            self._log(f"补充标签：{' '.join(note.tags)}")
+            editor.press("End")
+            for tag in note.tags:
+                editor.type(f"{tag} ")
+                page.wait_for_timeout(500)
+                self._confirm_tag(page, tag)
+        if note.topics:
+            self._log(f"补充话题：{' '.join(note.topics)}")
+            editor.press("End")
+            for topic in note.topics:
+                normalized = topic.strip().lstrip("#").strip()
+                if not normalized:
+                    continue
+                editor.type(f"#{normalized} ")
+                page.wait_for_timeout(500)
+                self._confirm_tag(page, f"#{normalized}")
+
+    def _apply_topics(self, page: Page, topics: list[str]) -> None:
+        for topic in topics:
+            normalized = topic.strip().lstrip("#").strip()
+            if not normalized:
+                continue
+            if self._is_topic_added(page, normalized):
+                continue
+            if not self._click_topic_add_button(page, normalized):
+                print(f"未找到活动话题“{normalized}”对应的添加入口，请人工确认页面候选项。")
+                continue
+            page.wait_for_timeout(1_000)
+            if not self._is_topic_added(page, normalized):
+                print(f"活动话题“{normalized}”点击后未确认写入，请人工检查页面状态。")
+
+    def _is_topic_added(self, page: Page, topic: str) -> bool:
+        escaped = re.escape(topic)
+        indicators = (
+            f'text=/已添加.*{escaped}|{escaped}.*已添加/',
+            f'text=/已参与.*{escaped}|{escaped}.*已参与/',
+        )
+        for selector in indicators:
+            if page.locator(selector).count() > 0:
+                return True
+        item = page.locator(f"xpath={_topic_item_xpath(topic)}")
+        if item.count() == 0:
+            return False
+        add_entry = item.first.locator("xpath=.//*[contains(normalize-space(.), '添加话题')]")
+        if add_entry.count() == 0:
+            return True
+        return False
+
+    def _click_topic_add_button(self, page: Page, topic: str) -> bool:
+        for xpath in _topic_button_xpaths(topic):
+            locator = page.locator(f"xpath={xpath}")
+            if locator.count() == 0:
+                continue
+            try:
+                locator.first.click(timeout=3_000)
+                return True
+            except PlaywrightTimeoutError:
+                continue
+
+        fallback = page.locator('button:has-text("添加话题"), [role="button"]:has-text("添加话题")')
+        for index in range(fallback.count()):
+            button = fallback.nth(index)
+            try:
+                container_text = button.locator("xpath=ancestor::*[self::div or self::section][1]").inner_text(timeout=1_000)
+            except Exception:
+                container_text = ""
+            if topic in container_text:
+                button.click(timeout=3_000)
+                return True
+        return False
+
+    def _create_context(self, browser: Any) -> Any:
+        storage_state = self._storage_state_value()
+        if storage_state is not None:
+            return browser.new_context(storage_state=storage_state)
+        return browser.new_context()
+
+    def _storage_state_value(self) -> str | dict[str, Any] | None:
+        if not self.cookies_path or not self.cookies_path.exists():
+            return None
+        raw = self.cookies_path.read_text(encoding="utf-8")
+        if not raw.strip():
+            return None
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return str(self.cookies_path)
+        if isinstance(payload, list):
+            return {"cookies": payload, "origins": []}
+        if isinstance(payload, dict) and "cookies" in payload:
+            return payload
+        return str(self.cookies_path)
+
     def _load_cookies(self, context: Any) -> None:
         if not self.cookies_path or not self.cookies_path.exists():
             return
@@ -157,10 +499,96 @@ class XhsPublisher:
     def _save_cookies(self, context: Any) -> None:
         if not self.cookies_path:
             return
-        self.cookies_path.write_text(
-            json.dumps(context.cookies(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        context.storage_state(path=str(self.cookies_path))
+
+    def _detect_scene(self, page: Page) -> str:
+        if "published=true" in page.url:
+            return "publish_result"
+        for scene in SCENE_SPECS:
+            for detector in scene.detectors:
+                if page.locator(detector).count() > 0:
+                    return scene.scene_name
+        return "unknown"
+
+    def _log(self, message: str) -> None:
+        print(f"[RedNoteBot] {message}")
+
+    def _wait_for_scene(self, page: Page, scene_names: tuple[str, ...], timeout_ms: int) -> str:
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            scene = self._detect_scene(page)
+            if scene in scene_names:
+                return scene
+            page.wait_for_timeout(500)
+        expected = ", ".join(_scene_label(name) for name in scene_names)
+        raise PlaywrightTimeoutError(f"等待场景超时，期望进入：{expected}")
+
+    def _wait_for_action(self, page: Page, field_name: str, timeout_ms: int) -> Locator:
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            locator = self._find_first_matching_locator(page, field_name)
+            if locator is not None and locator.first.is_visible():
+                return locator.first
+            page.wait_for_timeout(500)
+        raise PlaywrightTimeoutError(f"等待动作 `{field_name}` 对应元素超时。")
+
+    def _collect_page_features(self, page: Page) -> list[PageFeature]:
+        features: list[PageFeature] = []
+        for spec in SELECTOR_SPECS:
+            matched_selector, match_count, first_tag, first_text = self._probe_selectors(page, spec.selectors)
+            features.append(
+                PageFeature(
+                    scene_name=spec.scene_name,
+                    action_name=spec.action_name,
+                    field_name=spec.field_name,
+                    candidates=spec.selectors,
+                    matched_selector=matched_selector,
+                    description=spec.description,
+                    match_count=match_count,
+                    first_tag=first_tag,
+                    first_text=first_text[:80],
+                )
+            )
+        return features
+
+    def _click_action_if_found(self, page: Page, field_name: str) -> bool:
+        locator = self._find_first_matching_locator(page, field_name)
+        if locator is None:
+            return False
+        locator.first.click()
+        return True
+
+    def _require_locator(self, page: Page, field_name: str) -> Locator:
+        locator = self._find_first_matching_locator(page, field_name)
+        if locator is None:
+            raise RuntimeError(f"未找到动作 `{field_name}` 对应元素，请先重新采集页面特征。")
+        return locator.first
+
+    def _find_first_matching_locator(self, page: Page, field_name: str) -> Locator | None:
+        spec = _selector_spec(field_name)
+        for selector in spec.selectors:
+            locator = page.locator(selector)
+            if locator.count() > 0:
+                return locator
+        return None
+
+    def _probe_selectors(self, page: Page, selectors: tuple[str, ...]) -> tuple[str, int, str, str]:
+        for selector in selectors:
+            locator = page.locator(selector)
+            count = locator.count()
+            if count == 0:
+                continue
+            first = locator.first
+            try:
+                first_tag = first.evaluate("element => element.tagName.toLowerCase()")
+            except Exception:
+                first_tag = ""
+            try:
+                first_text = first.inner_text(timeout=1_500).strip().replace("\n", " ")
+            except Exception:
+                first_text = ""
+            return selector, count, first_tag, first_text
+        return "", 0, "", ""
 
 
 def _ensure_images_exist(images: list[Path]) -> None:
@@ -168,3 +596,54 @@ def _ensure_images_exist(images: list[Path]) -> None:
     if missing:
         joined = "\n".join(missing)
         raise FileNotFoundError(f"以下图片不存在：\n{joined}")
+
+
+def _selector_spec(field_name: str) -> SelectorSpec:
+    for spec in SELECTOR_SPECS:
+        if spec.field_name == field_name:
+            return spec
+    raise KeyError(f"未知动作字段：{field_name}")
+
+
+def _scene_label(scene_name: str) -> str:
+    for scene in SCENE_SPECS:
+        if scene.scene_name == scene_name:
+            return scene.label
+    return "未知场景"
+
+
+def _markdown_cell(value: str) -> str:
+    return value.replace("|", "\\|")
+
+
+def _topic_button_xpaths(topic: str) -> tuple[str, ...]:
+    literal = _xpath_literal(topic)
+    return (
+        f"{_topic_item_xpath(topic)}//*[self::button or @role='button' or self::span][contains(normalize-space(.), '添加话题')]",
+        f"//*[contains(@class, 'events')]//*[contains(normalize-space(.), {literal})]//*[self::button or @role='button' or self::span][contains(normalize-space(.), '添加话题')]",
+    )
+
+
+def _topic_container_xpaths(topic: str) -> tuple[str, ...]:
+    literal = _xpath_literal(topic)
+    return (
+        f"//*[contains(normalize-space(.), {literal})]/ancestor::*[self::div or self::section][1]",
+        f"//*[contains(normalize-space(.), {literal})]",
+    )
+
+
+def _xpath_literal(value: str) -> str:
+    if "'" not in value:
+        return f"'{value}'"
+    if '"' not in value:
+        return f'"{value}"'
+    parts = value.split("'")
+    quoted = ", \"'\", ".join(f"'{part}'" for part in parts)
+    return f"concat({quoted})"
+
+
+def _topic_item_xpath(topic: str) -> str:
+    literal = _xpath_literal(topic)
+    return "//*[contains(@class, 'event') or contains(@class, 'item')][.//*[contains(normalize-space(.), {literal})]]".format(
+        literal=literal
+    )

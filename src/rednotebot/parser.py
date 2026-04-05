@@ -15,6 +15,7 @@ class NoteContent:
     title: str
     body: str
     tags: list[str]
+    topics: list[str]
     images: list[Path]
 
 
@@ -49,6 +50,7 @@ def parse_markdown_note(note_path: str | Path) -> NoteContent:
         raise ValueError("Markdown 缺少正文内容，请提供 ## 正文 段落")
 
     tags = _parse_tags(sections.get("标签", []))
+    topics = _parse_topics(sections.get("活动话题", []), sections.get("话题", []))
     images = _parse_images(path.parent, body, sections.get("附加图片", []))
 
     return NoteContent(
@@ -56,6 +58,7 @@ def parse_markdown_note(note_path: str | Path) -> NoteContent:
         title=title,
         body=body,
         tags=tags,
+        topics=topics,
         images=images,
     )
 
@@ -64,17 +67,42 @@ def _parse_tags(lines: list[str]) -> list[str]:
     tags: list[str] = []
     for line in lines:
         stripped = line.strip()
-        if not stripped:
+        if not stripped or _is_separator_line(stripped):
             continue
         candidates = re.split(r"[\s,，]+", stripped)
         for candidate in candidates:
             normalized = candidate.strip()
-            if not normalized:
+            if not normalized or _is_separator_line(normalized):
                 continue
             if not normalized.startswith("#"):
                 normalized = f"#{normalized}"
             tags.append(normalized)
     return tags
+
+
+def _parse_topics(*sections: list[str]) -> list[str]:
+    topics: list[str] = []
+    seen: set[str] = set()
+    for lines in sections:
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or _is_separator_line(stripped):
+                continue
+            candidates = re.split(r"[\s,，]+", stripped)
+            for candidate in candidates:
+                normalized = candidate.strip().lstrip("#").strip()
+                if not normalized or _is_separator_line(normalized):
+                    continue
+                key = normalized.casefold()
+                if key in seen:
+                    continue
+                topics.append(normalized)
+                seen.add(key)
+    return topics
+
+
+def _is_separator_line(value: str) -> bool:
+    return bool(re.fullmatch(r"[-*_]{3,}", value))
 
 
 def _parse_images(base_dir: Path, body: str, extra_lines: list[str]) -> list[Path]:
